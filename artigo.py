@@ -431,25 +431,94 @@ class A2SDLightning(pl.LightningModule):
 # ---------------------
 # Example quick-run helper
 # ---------------------
-def example_train(data_dir: str, gpus: int = 1, max_epochs: int = 300):
-    dm = SIPaKMeDDataModule(data_dir=data_dir, img_size=224, batch_size=16, num_workers=0)
-    dm.setup()
-    num_classes = len(dm.train_dataset.classes) if hasattr(dm.train_dataset, 'classes') else len(dm.train_dataset.dataset.classes)
-    model = A2SDLightning(num_classes=num_classes, lr=1e-3, weight_decay=1e-4, pretrained=True)
-    # pass class weights
-    model.class_weights = dm.class_weights
-    model.criterion.weight = model.class_weights
 
-    ckpt = ModelCheckpoint(monitor='val/loss', mode='min', save_top_k=1)
+if __name__ == "__main__":
+
+    # --- Configurações ---
+    DATA_DIR = 'dataset'
+    MAX_EPOCHS = 300
+    BATCH_SIZE = 16
+    NUM_WORKERS = 0 # 0 é mais seguro no Windows, pode aumentar no Linux
+
+    # Otimização para GPUs modernas (RTX 3000/4000, A-Series)
+    if torch.cuda.is_available():
+        print(f"GPU encontrada: {torch.cuda.get_device_name(0)}")
+        torch.set_float32_matmul_precision('medium')
+    else:
+        print("AVISO: GPU não encontrada, rodando em CPU.")
+
+    print("--- 1. CONFIGURANDO DATAMODULE E MODELO ---")
+    
+    # 1. Configurar o DataModule
+    # (Usa a sua classe SIPaKMeDDataModule)
+    dm = SIPaKMeDDataModule(
+        data_dir=DATA_DIR, 
+        img_size=224, 
+        batch_size=BATCH_SIZE, 
+        num_workers=NUM_WORKERS
+    )
+    
+    # 2. Configurar o Modelo
+    # (Usa a sua classe A2SDLightning)
+    # Precisamos rodar setup() aqui para descobrir o num_classes
+    dm.setup(stage='fit') 
+    
+    # Pega o num_classes do dataset (funciona com ImageFolder ou Subset)
+    num_classes = 0
+    if hasattr(dm.train_dataset, 'classes'):
+        num_classes = len(dm.train_dataset.classes)
+    elif hasattr(dm.train_dataset, 'dataset'):
+        num_classes = len(dm.train_dataset.dataset.classes)
+    else:
+        raise Exception("Não foi possível determinar o número de classes do dataset.")
+
+    print(f"Dataset encontrado com {num_classes} classes.")
+    
+    model = A2SDLightning(
+        num_classes=num_classes, 
+        lr=1e-3, 
+        weight_decay=1e-4, 
+        pretrained=True
+    )
+    
+    # Passar os pesos de classe (lógica da sua example_train)
+    model.class_weights = dm.class_weights
+    if dm.class_weights is not None:
+         model.criterion.weight = model.class_weights
+
+    # 3. Configurar os Callbacks
+    # (Lógica da sua example_train)
+    # Salva o melhor modelo baseado na perda de validação
+    ckpt = ModelCheckpoint(
+        monitor='val/loss', 
+        mode='min', 
+        save_top_k=1,
+        filename='best-model-{epoch:02d}-{val_loss:.2f}' # Nome de arquivo claro
+    )
     lr_monitor = LearningRateMonitor(logging_interval='epoch')
+
+    # 4. Configurar o Trainer
+    # (Lógica da sua example_train)
     trainer = pl.Trainer(
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
         devices=1,
-        max_epochs=max_epochs,
+        max_epochs=MAX_EPOCHS,
         callbacks=[ckpt, lr_monitor],
-        precision=16,
+        precision="16-mixed", # Recomendado para GPUs modernas
         accumulate_grad_batches=4
-        )
-    trainer.fit(model, dm)
+    )
 
-example_train('dataset')
+    print("--- 2. INICIANDO TREINAMENTO ---")
+    
+    # 5. Treinar o modelo
+    trainer.fit(model, datamodule=dm)
+
+    print("--- 3. TREINAMENTO CONCLUÍDO. INICIANDO TESTE ---")
+    
+    # 6. Testar o modelo
+    # O Lightning é inteligente: ckpt_path="best" automaticamente
+    # encontra o caminho do melhor modelo salvo pelo callback 'ckpt'.
+    trainer.test(datamodule=dm, ckpt_path="best")
+    
+    print("--- 4. PROCESSO CONCLUÍDO ---")
+    print(f"O melhor modelo foi salvo em: {ckpt.best_model_path}")
